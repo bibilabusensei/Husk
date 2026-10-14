@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/Leviidev/Husk.git",
+  "commit": "37aff7c3973861afa67370dc4fbc7d3e6b6f266a",
+  "license": "GPL-2.0-or-later",
+  "stikjit": {
+    "repository": "https://github.com/StikDebug/StikJIT.git",
+    "version": "1.9.0",
+    "commit": "32287268fa5824f9edce4cb359f5833ce0cf7b00",
+    "license": "MPL-2.0",
+    "purpose": "Corresponding source for the unmodified upstream XCFramework; idevice sources and licenses are included in that checkout."
+  }
+}

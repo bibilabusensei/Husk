@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- Modified 2026-10-14: display name identifies the JIT diagnostic fork. -->
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
@@ -11,7 +12,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Husk</string>
+	<string>Husk Rebuilt</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -192,3 +193,4 @@
 	</array>
 </dict>
 </plist>
+

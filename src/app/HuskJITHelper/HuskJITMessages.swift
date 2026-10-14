@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Modified 2026-10-14: per-request authenticated progress channel metadata.
 import Foundation
 
 /// Codable messages shared by Husk and its JIT helper extension. Compiled into
@@ -19,6 +20,10 @@ struct HuskJITRequest: Codable, Sendable {
     let targetPID: Int32?
     let pairingData: Data?
     let scriptBase64: String?
+    // Optional, defaulted properties preserve existing factory call sites and
+    // permit old requests to decode without progress-channel keys.
+    var progressPort: UInt16? = nil
+    var progressToken: String? = nil
 
     static func prepare(pairingData: Data) -> HuskJITRequest {
         HuskJITRequest(operation: .prepare, targetPID: nil,
