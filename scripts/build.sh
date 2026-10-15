@@ -34,6 +34,14 @@ finish() {
             echo "Warning: could not create native log artifact directory; original build exit code is $status." >&2
         fi
     fi
+    local qemu_logs
+    for qemu_logs in "$ROOT/build/source/third_party/build"/qemu-*/_husk_build/meson-logs; do
+        [ -d "$qemu_logs" ] || continue
+        if ! mkdir -p "$ROOT/artifacts/logs/qemu-meson" || \
+           ! cp -R "$qemu_logs/." "$ROOT/artifacts/logs/qemu-meson/"; then
+            echo "Warning: could not preserve QEMU Meson probe logs; original build exit code is $status." >&2
+        fi
+    done
     if ! python3 "$ROOT/scripts/source-provenance.py" "$ROOT" "$ROOT/build/source"; then
         echo "Warning: final provenance refresh failed; original build exit code is $status." >&2
     fi

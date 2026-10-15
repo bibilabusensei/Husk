@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Modified 2026-10-15 by Husk Rebuilt contributors: explicitly disable execution
+# of iOS compiler probes on macOS.
 # Husk: cross-compile QEMU + its minimal dependency set for arm64-apple-ios.
 #
 # Toolchain setup follows UTM's scripts/build_dependencies.sh (the -target triple,
@@ -143,6 +146,34 @@ apply_patch() {
     touch "$stamp"
 }
 
+# QEMU creates its own machine file instead of using CROSS_DARWIN. On Apple
+# Silicon, macOS and iOS both look like darwin/aarch64 to Meson; compiler sanity
+# checks must compile target programs without trying to execute them on macOS.
+# Keep a separate stamp: the upstream .husk-patched marker covers other patches.
+apply_qemu_ios_cross_patch() {
+    local dir="$SRC/qemu-10.0.12-utm"
+    local patch_file="$HUSK_ROOT/patches/husk-qemu-ios-meson-cross.patch"
+    local stamp="$dir/.husk-ios-meson-cross-patched-v1"
+    local log="$LOGS/qemu-ios-meson-cross-patch.log"
+    [ -f "$patch_file" ] || fail "missing QEMU iOS Meson patch" "$patch_file"
+    [ -f "$dir/configure" ] || fail "missing QEMU configure" "$dir/configure"
+    : > "$log" || fail "cannot write QEMU iOS patch log" "$log"
+    if [ ! -f "$stamp" ]; then
+        echo "[patch] qemu-10.0.12-utm <- husk-qemu-ios-meson-cross.patch"
+        if ( cd "$dir" && patch -f -F 0 -p1 -N -r - --dry-run < "$patch_file" ) >> "$log" 2>&1; then
+            ( cd "$dir" && patch -f -F 0 -p1 -N -r - < "$patch_file" ) >> "$log" 2>&1 \
+                || fail "applying QEMU iOS Meson patch" "$log"
+        elif ! ( cd "$dir" && patch -f -F 0 -p1 -R -r - --dry-run < "$patch_file" ) >> "$log" 2>&1; then
+            fail "QEMU iOS Meson patch does not match pinned source" "$log"
+        fi
+    fi
+    # Also check a previously stamped tree, and recover safely after an apply
+    # succeeded but the process stopped before it could create the stamp.
+    ( cd "$dir" && patch -f -F 0 -p1 -R -r - --dry-run < "$patch_file" ) >> "$log" 2>&1 \
+        || fail "QEMU iOS Meson patch verification" "$log"
+    touch "$stamp" || fail "recording QEMU iOS Meson patch" "$log"
+}
+
 # ---------------------------------------------------------------- stages
 stage_libffi()      { build_autotools libffi-3.5.0; }
 stage_glib()        { build_meson glib-2.83.0 "$CROSS_IOS" \
@@ -160,6 +191,7 @@ stage_qemu() {
     local log="$LOGS/qemu.log"
     done_stage qemu && { echo "[skip] qemu"; return 0; }
     apply_patch qemu-10.0.12-utm qemu-10.0.12-utm.patch
+    apply_qemu_ios_cross_patch
     banner "building qemu (this is the long one)"
     rm -rf "$dir/_husk_build"; mkdir -p "$dir/_husk_build"
     ( cd "$dir/_husk_build" \

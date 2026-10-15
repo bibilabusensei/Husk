@@ -2,7 +2,7 @@
 
 这是 Husk 的可重建改写版源码交付。保留上游真正的 QEMU Android 模拟器、Android 原生代码翻译层、ANGLE / MoltenVK 和 APK 导入流程，重写内置 JIT 设置检查与 helper 进度反馈。针对一直停在 “Checking LocalDevVPN and the Developer Disk Image…” 的问题，加入明确阶段、耗时、helper 心跳、可取消检查和诊断报告。
 
-**当前交付的是源码与构建流程。此交付环境为 Windows，没有 Xcode，尚未完成 iOS 编译、产出 IPA 或设备验证。JIT 成功和具体 APK 兼容性不能保证。** 构建流程会真正编译上游运行时，失败即停止，不生成占位 App 或把旧 IPA 当成新构建。
+**提供源码与真实构建流程。App 与两个扩展已通过 GitHub macOS 上的真实 iPhoneOS SDK 类型检查，生产消息与本机通信检查也已通过。完整 IPA 构建状态请查看 Actions；尚未进行 iPhone 设备验证。JIT 成功和具体 APK 兼容性不能保证。** 构建流程会真正编译上游运行时，失败即停止，不生成占位 App 或把旧 IPA 当成新构建。
 
 ## 实际改动
 
@@ -19,7 +19,7 @@
 
 真实上游为 [Leviidev/Husk](https://github.com/Leviidev/Husk)，固定基线为 [`37aff7c3973861afa67370dc4fbc7d3e6b6f266a`](https://github.com/Leviidev/Husk/tree/37aff7c3973861afa67370dc4fbc7d3e6b6f266a)。StikJIT 使用上游随附的 1.9.0 XCFramework，其对应源码固定为 [`32287268fa5824f9edce4cb359f5833ce0cf7b00`](https://github.com/StikDebug/StikJIT/tree/32287268fa5824f9edce4cb359f5833ce0cf7b00)。全部来源记录在 [UPSTREAM.json](UPSTREAM.json)。
 
-压缩交付包采用“固定上游 + 改写源码 overlay”，以免复制大量已有运行时和二进制框架。`scripts/prepare-source.sh` 获取完整上游到 `build/source`，核对 commit，覆盖 `overlay/src/app/...`；原生依赖构建完成后由上游打包脚本用 XcodeGen 重新生成 `Husk.xcodeproj`，保证依赖路径已存在。工程包含主 App、`HuskJITHelper` 和 `HuskDownloadsWidget` 三个目标。GitHub fork 中对应改写也应同步到原工程 `src/app/...`，便于直接阅读与审查；可重建工作流以 overlay 为来源。
+压缩交付包采用“固定上游 + 改写源码 overlay”，以免复制大量已有运行时和二进制框架。`scripts/prepare-source.sh` 获取完整上游到 `build/source`，核对 commit，应用 `overlay/` 中的改写源码和构建补丁；原生依赖构建完成后由上游打包脚本用 XcodeGen 重新生成 `Husk.xcodeproj`，保证依赖路径已存在。工程包含主 App、`HuskJITHelper` 和 `HuskDownloadsWidget` 三个目标。GitHub fork 中对应改写也应同步到原工程 `src/app/...`，便于直接阅读与审查；可重建工作流以 overlay 为来源。
 
 上游 README 报告 iOS / iPadOS 16.0 起可安装，内置 StikJIT helper 目标要求 iOS 26.0；更早系统沿用上游外部 StikDebug 路径。当前内置 DDI 实现按系统选择 iOS 26.4 之前的 personalized 三文件格式或 26.4 起的 cryptex 五文件格式。配对、下载服务器、设备接受挂载和调试权限仍由上游与 iOS 实际行为决定。详见 [上游 JIT 文档](https://github.com/Leviidev/Husk/blob/37aff7c3973861afa67370dc4fbc7d3e6b6f266a/docs/06-built-in-jit.md)。
 
@@ -35,7 +35,7 @@ rustup target add aarch64-apple-ios
 bash scripts/build.sh
 ```
 
-构建脚本会在 `build/host-python` 创建独立 Python 环境并安装固定版本的 PyYAML，供 virglrenderer 生成格式表；启动原生构建前会确认该模块可导入。
+构建脚本会在 `build/host-python` 创建独立 Python 环境并安装固定版本的 PyYAML，供 virglrenderer 生成格式表；启动原生构建前会确认该模块可导入。QEMU 的独立 Meson 配置会明确禁止在 Mac 上运行 iOS 编译探测程序；补丁按固定源文件核对并保留独立标记。下载归档使用重试和临时文件，失败会在解包前停止。
 
 默认 bundle ID 为 `com.husk.rebuilt`，两个扩展分别追加 `.JITHelper` 与 `.Downloads`。需要自身 App ID 时，在开始构建前设置：
 
@@ -50,7 +50,7 @@ bash scripts/build.sh
 
 ## GitHub Actions 和 IPA
 
-`.github/workflows/ios-build.yml` 在 `codex/jit-rebuild` 分支 push 时执行无开发者证书构建，也支持 Actions 中手动运行。默认 runner 为 `macos-26`，手动输入可选 `macos-15`、Xcode 路径和 App ID。Fork 可能需要先在自己的仓库启用 Actions。独立的轻量检查 job 先直接编译生产消息/进度源码并运行消息兼容与本机 Network 传输检查，通过后才执行耗时的运行时构建；这些检查未在当前 Windows 环境执行，检查成功也不能代替完整 iOS 构建或设备 JIT 验证。
+`.github/workflows/ios-build.yml` 在 `codex/jit-rebuild` 分支 push 时执行无开发者证书构建，也支持 Actions 中手动运行。默认 runner 为 `macos-26`，手动输入可选 `macos-15`、Xcode 路径和 App ID。Fork 可能需要先在自己的仓库启用 Actions。独立的轻量检查 job 先直接编译生产消息/进度源码并运行消息兼容与本机 Network 传输检查，通过后才执行耗时的运行时构建；真实 iPhoneOS SDK 的独立检查覆盖完整主 App、helper 和 Widget 的 Swift 源码。检查成功仍需分别确认完整 iOS 链接打包与设备 JIT 结果。
 
 构建成功后分别上传：
 
