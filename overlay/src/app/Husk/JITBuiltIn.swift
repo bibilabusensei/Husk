@@ -181,7 +181,11 @@ private final class HelperRequest {
             DispatchQueue.main.async { MainActor.assumeIsolated {
                 guard let self, !self.retired else { return }
                 guard let uuid else {
-                    self.end(.failure(Self.error(7, "JIT helper 未能启动。请重新安装并保留 App Extensions。")))
+                    // A nil UUID confirms no request started. Even after an
+                    // earlier timeout/cancellation, there is no helper process
+                    // to await; release the retry exclusion immediately.
+                    self.retire()
+                    self.deliver(.failure(Self.error(7, "JIT helper 未能启动。请重新安装并保留 App Extensions。")))
                     return
                 }
                 self.requestID = uuid
