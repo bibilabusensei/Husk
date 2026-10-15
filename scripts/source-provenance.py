@@ -39,6 +39,12 @@ for directory in (source / "third_party", root / "build/license-sources"):
             if name.endswith((".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".zip", ".crate")) or name in ("Cargo.lock", "Package.resolved"):
                 entry = {"path": str(path.relative_to(root)), "sha256": digest(path), "size": path.stat().st_size}
                 (locks if name in ("Cargo.lock", "Package.resolved") else archives).append(entry)
+# The app's pairing crate is outside third_party. Record its actual lockfile
+# explicitly rather than scanning the whole source tree or duplicating walks.
+pairing_lock = source / "src/rppairing-ios/Cargo.lock"
+if pairing_lock.is_file() and not pairing_lock.is_symlink():
+    locks.append({"path": str(pairing_lock.relative_to(root)),
+                  "sha256": digest(pairing_lock), "size": pairing_lock.stat().st_size})
 artifacts = root / "artifacts"
 artifacts.mkdir(exist_ok=True)
 git_root = git(root, "rev-parse", "--show-toplevel")

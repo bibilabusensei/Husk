@@ -18,9 +18,28 @@ printf '%s\n' "$DD" > "$ROOT/build/derived-data-path.txt"
 finish() {
     local status=$?
     trap - EXIT
-    [ ! -f "$DD/build.log" ] || cp "$DD/build.log" "$ROOT/artifacts/logs/xcodebuild.log"
-    python3 "$ROOT/scripts/source-provenance.py" "$ROOT" "$ROOT/build/source" || status=1
-    printf '%s\n' "$status" > "$ROOT/artifacts/build-exit-status.txt"
+    # Diagnostics must not replace the real build exit code, including when
+    # a full disk or missing permissions prevent collecting the logs.
+    if [ -f "$DD/build.log" ]; then
+        if ! cp "$DD/build.log" "$ROOT/artifacts/logs/xcodebuild.log"; then
+            echo "Warning: could not preserve Xcode build.log; original build exit code is $status." >&2
+        fi
+    fi
+    if [ -d "$ROOT/build/source/build/logs" ]; then
+        if mkdir -p "$ROOT/artifacts/logs/native"; then
+            if ! cp -R "$ROOT/build/source/build/logs/." "$ROOT/artifacts/logs/native/"; then
+                echo "Warning: could not preserve all native build logs; original build exit code is $status." >&2
+            fi
+        else
+            echo "Warning: could not create native log artifact directory; original build exit code is $status." >&2
+        fi
+    fi
+    if ! python3 "$ROOT/scripts/source-provenance.py" "$ROOT" "$ROOT/build/source"; then
+        echo "Warning: final provenance refresh failed; original build exit code is $status." >&2
+    fi
+    if ! printf '%s\n' "$status" > "$ROOT/artifacts/build-exit-status.txt"; then
+        echo "Warning: could not record build exit status $status in artifacts." >&2
+    fi
     exit "$status"
 }
 trap finish EXIT
