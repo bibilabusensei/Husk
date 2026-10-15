@@ -55,8 +55,13 @@ jobs:
           path: artifacts/logs/ipc-checks.log
           if-no-files-found: warn
 
+  ios-swift-typecheck:
+    uses: ./.github/workflows/ios-swift-check.yml
+    with:
+      xcode_path: ${{ inputs.xcode_path || '' }}
+
   build:
-    needs: checks
+    needs: [checks, ios-swift-typecheck]
     runs-on: ${{ inputs.runner || 'macos-26' }}
     timeout-minutes: 360
     env:

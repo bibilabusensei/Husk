@@ -5,6 +5,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$ROOT/artifacts/logs" "$ROOT/build"
 if [ -z "${DEVELOPER_DIR:-}" ]; then export DEVELOPER_DIR="$(bash "$ROOT/scripts/select-xcode.sh")"; fi
 bash "$ROOT/scripts/prepare-source.sh" 2>&1 | tee "$ROOT/artifacts/logs/prepare.log"
+# virglrenderer invokes python3 from PATH to generate its Gallium format tables.
+# Keep its Python modules in a build-local environment: Homebrew's interpreter
+# is externally managed and a globally installed meson does not install PyYAML.
+python3 -m venv "$ROOT/build/host-python"
+"$ROOT/build/host-python/bin/python3" -m pip install --disable-pip-version-check \
+    -r "$ROOT/scripts/requirements-host.txt" 2>&1 | tee "$ROOT/artifacts/logs/host-python-install.log"
+export PATH="$ROOT/build/host-python/bin:$PATH"
 bash "$ROOT/scripts/toolchain-check.sh" 2>&1 | tee "$ROOT/artifacts/logs/preflight.log"
 export DD="$(mktemp -d "$ROOT/build/derived-data.XXXXXX")"
 printf '%s\n' "$DD" > "$ROOT/build/derived-data-path.txt"

@@ -35,6 +35,8 @@ rustup target add aarch64-apple-ios
 bash scripts/build.sh
 ```
 
+构建脚本会在 `build/host-python` 创建独立 Python 环境并安装固定版本的 PyYAML，供 virglrenderer 生成格式表；启动原生构建前会确认该模块可导入。
+
 默认 bundle ID 为 `com.husk.rebuilt`，两个扩展分别追加 `.JITHelper` 与 `.Downloads`。需要自身 App ID 时，在开始构建前设置：
 
 ```sh

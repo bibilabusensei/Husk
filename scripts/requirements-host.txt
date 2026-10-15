@@ -1,0 +1,2 @@
+# Build-time Gallium format generation; not included in the iOS application.
+PyYAML==6.0.3

@@ -8,6 +8,9 @@ for tool in xcodebuild xcodegen meson ninja pkg-config python3 qemu-img rustup c
     command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }
 done
 mkdir -p "$ROOT/artifacts/logs"
+# Check the same executable that Meson's find_installation('python3') uses,
+# before spending time rebuilding ANGLE and the rest of the native runtime.
+python3 -c 'import sys, yaml; print("Gallium host Python:", sys.executable, "PyYAML", yaml.__version__)'
 {
     xcodebuild -version
     xcrun swiftc --version
