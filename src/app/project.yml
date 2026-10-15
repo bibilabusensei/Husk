@@ -13,7 +13,7 @@ settings:
     # The app and its JIT helper extension follow this together: the helper's
     # identifier has to sit under the app's. Change this, not
     # PRODUCT_BUNDLE_IDENTIFIER.
-    HUSK_BUNDLE_IDENTIFIER: com.husk.app
+    HUSK_BUNDLE_IDENTIFIER: com.husk.rebuilt
     # The app's entitlements only. A signed development build has to drop
     # dynamic-codesigning, which Apple will not provision; overriding this
     # rather than CODE_SIGN_ENTITLEMENTS keeps the override off the helper.
@@ -50,6 +50,8 @@ targets:
           - "husk-tl-unity-app.h"
       # The messages the app and its JIT helper exchange.
       - path: HuskJITHelper/HuskJITMessages.swift
+      # Modified 2026-10-14: authenticated local progress shared with the helper.
+      - path: HuskJITHelper/HuskJITProgress.swift
       # The download Live Activity's attributes, shared with the widget that draws it.
       - path: Shared
     settings:
@@ -303,3 +305,4 @@ targets:
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
+

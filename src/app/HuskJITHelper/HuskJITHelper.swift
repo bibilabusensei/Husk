@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Modified 2026-10-14: authenticated phase progress to the main App.
 import Foundation
 import StikJIT
 
@@ -12,6 +13,27 @@ private enum HuskJITWork {
     static let queue = DispatchQueue(label: "com.husk.app.jit-helper")
 
     static func handle(_ request: HuskJITRequest) -> HuskJITRequest.Response {
+        let reporter: HuskJITProgressReporter?
+        if let port = request.progressPort, let token = request.progressToken, port != 0,
+           (32...128).contains(token.utf8.count) {
+            reporter = HuskJITProgressReporter(port: port, token: token)
+        } else {
+            reporter = nil
+        }
+        defer { reporter?.stop() }
+        reporter?.send(stage: "helperStarted")
+        func report(_ stage: StikJIT.PreparationStage) {
+            switch stage {
+            case .checkingReachability: reporter?.send(stage: "checkingReachability")
+            case .checkingDDI: reporter?.send(stage: "checkingDDI")
+            case .downloadingDDI(let fraction, _):
+                reporter?.send(stage: "downloadingDDI", fraction: fraction)
+            case .mountingDDI(let fraction): reporter?.send(stage: "mountingDDI", fraction: fraction)
+            case .verifyingDDI: reporter?.send(stage: "verifyingDDI")
+            case .ready: reporter?.send(stage: request.operation == .enable ? "attaching" : "ready")
+            @unknown default: break
+            }
+        }
         let manager = FileManager.default
         let root = manager.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("StikJIT", isDirectory: true)
@@ -20,6 +42,7 @@ private enum HuskJITWork {
         do {
             try manager.createDirectory(at: root, withIntermediateDirectories: true)
             if request.operation == .resetDDI {
+                reporter?.send(stage: "resettingDDI")
                 try StikJIT.resetCachedDDI(at: paths)
                 return .init(success: true, message: "Developer Disk Image cache reset.",
                              txmPresent: StikJIT.isTXMPresent)
@@ -37,7 +60,7 @@ private enum HuskJITWork {
             case .prepare:
                 let readiness = StikJIT.prepareDevice(
                     pairingFile: pairingURL, paths: paths,
-                    progress: { NSLog("[HuskJIT] prepare: %@", String(describing: $0)) })
+                    progress: report)
                 switch readiness {
                 case .ready(let security):
                     return .init(success: true,
@@ -62,8 +85,9 @@ private enum HuskJITWork {
                     ddiPaths: paths,
                     script: .customBase64(scriptBase64),
                     forceScript: true,
-                    preparationProgress: { NSLog("[HuskJIT] prepare: %@", String(describing: $0)) },
-                    progress: { NSLog("[HuskJIT] %@", $0) })
+                    preparationProgress: report,
+                    progress: { _ in reporter?.send(stage: "scriptRunning") })
+                reporter?.send(stage: "detached")
                 return .init(success: true, message: "Husk detached cleanly from its built-in JIT helper.",
                              txmPresent: StikJIT.isTXMPresent)
             case .resetDDI:
@@ -99,3 +123,4 @@ final class HuskJITHelperHandler: NSObject, NSExtensionRequestHandling {
         }
     }
 }
+

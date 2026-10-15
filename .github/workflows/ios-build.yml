@@ -1,0 +1,168 @@
+name: Husk Rebuilt iOS
+on:
+  push:
+    branches: [codex/jit-rebuild]
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: macos-26 supplies a newer Xcode; macos-15 may not import Swift 6.4 StikJIT
+        type: choice
+        options: [macos-26, macos-15]
+        default: macos-26
+      xcode_path:
+        description: Optional full Xcode.app path; empty selects newest installed stable Xcode
+        type: string
+        required: false
+      bundle_id:
+        description: App ID; helper and widget append .JITHelper and .Downloads
+        type: string
+        default: com.husk.rebuilt
+      development_sign:
+        description: Sign for registered devices using the three development profiles in Secrets
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: husk-rebuilt-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+jobs:
+  checks:
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    timeout-minutes: 15
+    env:
+      XCODE_PATH: ${{ inputs.xcode_path }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Select Xcode for production IPC checks
+        run: bash scripts/select-xcode.sh
+      - name: Check real Swift messages and local Network transport
+        run: |
+          mkdir -p artifacts/logs
+          bash checks/run.sh 2>&1 | tee artifacts/logs/ipc-checks.log
+      - name: Upload IPC check log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: swift-ipc-check-log
+          path: artifacts/logs/ipc-checks.log
+          if-no-files-found: warn
+
+  ios-swift-typecheck:
+    uses: ./.github/workflows/ios-swift-check.yml
+    with:
+      xcode_path: ${{ inputs.xcode_path || '' }}
+
+  build:
+    needs: [checks, ios-swift-typecheck]
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    timeout-minutes: 360
+    env:
+      HUSK_BUNDLE_IDENTIFIER: ${{ inputs.bundle_id || 'com.husk.rebuilt' }}
+      XCODE_PATH: ${{ inputs.xcode_path }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install full native runtime build dependencies
+        run: |
+          mkdir -p artifacts/logs
+          brew install meson ninja pkg-config xcodegen qemu cmake autoconf automake libtool 2>&1 | tee artifacts/logs/brew.log
+      - name: Select Xcode
+        run: bash scripts/select-xcode.sh
+      - name: Build upstream Android runtime and rewritten JIT integration
+        run: bash scripts/build.sh
+      - name: Preserve source snapshot even on a failed build
+        if: always()
+        run: |
+          if [ -d build/source ] && [ -d build/license-sources/StikJIT ] && [ ! -f artifacts/HuskRebuilt-corresponding-source.tar.gz ]; then
+            bash scripts/archive-source.sh
+          fi
+      - name: Upload logs and source provenance
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: build-logs-and-provenance
+          path: |
+            artifacts/logs/
+            artifacts/*.json
+            artifacts/*sha256.txt
+            artifacts/build-exit-status.txt
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Upload corresponding source and license material
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: corresponding-source
+          path: artifacts/HuskRebuilt-corresponding-source.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 0
+      - name: Upload unsigned IPA (cannot directly install)
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-ipa
+          path: artifacts/HuskRebuilt-unsigned.ipa
+          if-no-files-found: error
+          compression-level: 0
+      - name: Upload ad hoc IPA (SideStore must re-sign)
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: adhoc-ipa-resign-required
+          path: artifacts/HuskRebuilt-adhoc-resign-required.ipa
+          if-no-files-found: error
+          compression-level: 0
+      - name: Upload configuration for optional signing
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signing-build-config
+          path: artifacts/build-config.json
+          if-no-files-found: error
+
+  development-sign:
+    if: github.event_name == 'workflow_dispatch' && inputs.development_sign
+    needs: build
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    timeout-minutes: 30
+    environment: ios-development-signing
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned-ipa
+          path: artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signing-build-config
+          path: artifacts
+      - name: Sign app and two extensions with matching developer profiles
+        env:
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_APP_PROFILE_BASE64: ${{ secrets.IOS_APP_PROFILE_BASE64 }}
+          IOS_HELPER_PROFILE_BASE64: ${{ secrets.IOS_HELPER_PROFILE_BASE64 }}
+          IOS_WIDGET_PROFILE_BASE64: ${{ secrets.IOS_WIDGET_PROFILE_BASE64 }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: python3 scripts/sign-development.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: development-device-ipa
+          path: |
+            artifacts/HuskRebuilt-development-device.ipa
+            artifacts/development-signing-report.json
+          if-no-files-found: error
+          compression-level: 0

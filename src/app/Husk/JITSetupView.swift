@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Modified 2026-10-14: Chinese staged setup and shareable diagnostics.
 import SwiftUI
+import Combine
 import UniformTypeIdentifiers
 
 /// The JIT walkthrough: pick a way in, follow its numbered steps, end with JIT on.
@@ -15,6 +17,7 @@ struct JITSetupFlow: View {
     @ObservedObject private var pairing = OnDevicePairing.shared
     @State private var path: [Step] = []
     @State private var importing = false
+    @State private var jitMemoryReady = false
     @Environment(\.dismiss) private var dismiss
 
     private var device: String { OnDevicePairing.deviceKind }
@@ -43,6 +46,7 @@ struct JITSetupFlow: View {
             }
         }
         .onAppear {
+            jitMemoryReady = JITBootstrap.prewarmed || JITBootstrap.isLive || JITBootstrap.mapJITResult == true
             jit.refreshPairingStatus()
             pairing.reset()
             // A failed enable from the Library lands on the step that can fix it.
@@ -51,12 +55,16 @@ struct JITSetupFlow: View {
             }
             HuskLog.log("ui", "JIT walkthrough opened")
         }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+            jitMemoryReady = JITBootstrap.prewarmed || JITBootstrap.isLive || JITBootstrap.mapJITResult == true
+        }
         // Swiping the sheet away, or a copy shown from onboarding, must not
         // leave a request to show it again behind.
         .onDisappear { jit.showSetup = false }
     }
 
     private func close() {
+        if jit.busy { jit.cancelBuiltIn() }
         jit.showSetup = false
         dismiss()
     }
@@ -274,28 +282,43 @@ struct JITSetupFlow: View {
 
     // MARK: Enable
 
-    private var attached: Bool { jit.attachGeneration > 0 || JITBootstrap.debuggedFlag }
+    private var attached: Bool { jitMemoryReady }
 
     private var enable: some View {
-        page(symbol: "bolt.badge.checkmark", title: "Turn on JIT",
-             subtitle: "The first check downloads and mounts Apple's Developer Disk Image, "
-                     + "which can take a minute.") {
+        page(symbol: "bolt.badge.checkmark", title: "设置 JIT",
+             subtitle: "先检查本机配对和 VPN，再下载、挂载并验证 DDI。准备成功后，调试器才能申请 JIT 内存。") {
             VStack(alignment: .leading, spacing: 14) {
-                point(1, "Tap **Check setup**. Husk checks LocalDevVPN and prepares the Developer Disk Image.",
+                point(1, "点 **检查设置**，查看 VPN、配对连接和 DDI 的当前阶段。",
                       done: jit.prepared || attached)
-                point(2, "Tap **Enable JIT**. Husk's helper attaches and Android can start.", done: attached)
+                point(2, "准备完成后点 **启用 JIT**。最终以可执行内存成功准备为准。", done: attached)
             }
             .padding(16).huskCard()
 
             if jit.busy {
-                HStack(spacing: 11) {
-                    ProgressView().tint(Theme.accent)
-                    Text(jit.status ?? "Working…").font(.system(size: 14)).foregroundStyle(Theme.text)
-                    Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 11) {
+                        ProgressView().tint(Theme.accent)
+                        Text(jit.status ?? "正在处理…").font(.system(size: 14)).foregroundStyle(Theme.text)
+                    }
+                    if let fraction = jit.progressFraction {
+                        ProgressView(value: fraction).tint(Theme.accent)
+                        Text("阶段完成进度 \(Int(fraction * 100))% · 已等待 \(jit.elapsedSeconds) 秒")
+                            .font(.caption).foregroundStyle(Theme.textDim)
+                    } else {
+                        Text("已等待 \(jit.elapsedSeconds) 秒 · \(jit.helperResponding ? "helper 有响应" : "尚未收到 helper 心跳")")
+                            .font(.caption).foregroundStyle(Theme.textDim)
+                    }
+                    if jit.progressStalled {
+                        Text("90 秒没有新的阶段进度。单个 DDI 文件下载可能暂时不更新百分比；可继续等待，或取消并导出诊断。")
+                            .font(.footnote).foregroundStyle(.orange)
+                    }
+                    Button("取消本次检查", role: .cancel) { jit.cancelBuiltIn() }
+                        .font(.subheadline.weight(.semibold))
+                        .disabled(JITBootstrap.debuggedFlag)
                 }
                 .padding(16).huskCard(high: true)
             } else if attached {
-                outcome("JIT is on. Android can start.", ok: true)
+                outcome("JIT 可执行内存已准备好。APK 能否运行仍取决于引擎、架构和运行时支持。", ok: true)
             } else if let error = jit.error {
                 VStack(alignment: .leading, spacing: 10) {
                     outcome(error, ok: false)
@@ -310,25 +333,34 @@ struct JITSetupFlow: View {
                             .font(.system(size: 14, weight: .semibold))
                     }
                 }
+            } else if JITBootstrap.debuggedFlag {
+                Text("调试器已连接，正在确认可执行内存。如果停留在此处，请分享设置诊断。")
+                    .font(.footnote).foregroundStyle(.orange)
             } else if let status = jit.status {
                 outcome(status, ok: true)
             }
 
+            ShareLink(item: jit.diagnosticReport) {
+                Label("分享本次设置诊断", systemImage: "square.and.arrow.up")
+            }
+            .font(.subheadline.weight(.semibold))
+            DisclosureGroup("安装和签名检查") { JITDiagnosticsPanel() }
+
             if !attached {
-                Button("Reset Developer Disk Image", role: .destructive) { jit.resetDDI() }
+                Button("重置 Developer Disk Image 缓存", role: .destructive) { jit.resetDDI() }
                     .font(.system(size: 13, weight: .medium))
                     .disabled(jit.busy)
                     .padding(.top, 4)
             }
         } actions: {
             if attached {
-                Button("Done") { close() }.buttonStyle(PrimaryButtonStyle())
+                Button("完成") { close() }.buttonStyle(PrimaryButtonStyle())
             } else if jit.prepared {
-                Button { jit.enableBuiltIn() } label: { Label("Enable JIT", systemImage: "bolt.fill") }
+                Button { jit.enableBuiltIn() } label: { Label("启用 JIT", systemImage: "bolt.fill") }
                     .buttonStyle(PrimaryButtonStyle(enabled: !jit.busy))
                     .disabled(jit.busy)
             } else {
-                Button("Check setup") { jit.prepareBuiltIn() }
+                Button("检查设置") { jit.prepareBuiltIn() }
                     .buttonStyle(PrimaryButtonStyle(enabled: !jit.busy))
                     .disabled(jit.busy)
             }
@@ -485,3 +517,4 @@ struct JITSetupFlow: View {
             .padding(14).huskCard()
     }
 }
+

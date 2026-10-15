@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Modified 2026-10-14: phase progress, monotonic stall detection and request isolation.
 import Foundation
 import SwiftUI
 import UIKit
@@ -121,6 +122,19 @@ final class JITCoordinator: ObservableObject {
     @Published private(set) var status: String?
     @Published private(set) var error: String?
     @Published private(set) var txmPresent: Bool?
+    @Published private(set) var progressFraction: Double?
+    @Published private(set) var elapsedSeconds = 0
+    @Published private(set) var progressStalled = false
+    @Published private(set) var helperResponding = false
+    @Published private(set) var diagnosticEvents: [String] = []
+    private var activeRequest: UUID?
+    private var monitoring: Timer?
+    private var requestBegan: TimeInterval = 0
+    private var lastProgressAt: TimeInterval = 0
+    private var lastHeartbeatAt: TimeInterval = 0
+    private var lastStage: String?
+    private var lastFraction: Double?
+    private var attachBegan: TimeInterval?
     /// The setup check passed for the current pairing file.
     @Published private(set) var prepared = false
     @Published private(set) var pairingSource = JITPairingFileStore.source
@@ -156,7 +170,16 @@ final class JITCoordinator: ObservableObject {
         pairingSource = JITPairingFileStore.source
     }
 
-    private func log(_ line: String) { HuskLog.log("jit", line) }
+    private func log(_ line: String) {
+        let safe = JITDiagnostics.redact(line)
+        HuskLog.log("jit", safe)
+        diagnosticEvents.append("[\(elapsedSeconds)s] " + safe)
+        if diagnosticEvents.count > 80 { diagnosticEvents.removeFirst(diagnosticEvents.count - 80) }
+    }
+
+    var diagnosticReport: String {
+        JITDiagnostics.snapshot() + "\n\n本次设置：\n" + diagnosticEvents.joined(separator: "\n")
+    }
 
     /// Get a debugger attached with whichever method applies, or open the setup
     /// walkthrough when that method is not set up yet.
@@ -180,6 +203,7 @@ final class JITCoordinator: ObservableObject {
     }
 
     func enable() {
+        guard !busy else { return }
         guard !JITBootstrap.ready else { return }
         error = nil
         connectionProblem = nil
@@ -265,26 +289,7 @@ final class JITCoordinator: ObservableObject {
     /// Check LocalDevVPN and the Developer Disk Image, mounting it when needed.
     func prepareBuiltIn() {
         guard let pairing = builtInPairing() else { return }
-        busy = true
-        error = nil
-        connectionProblem = nil
-        status = "Checking LocalDevVPN and the Developer Disk Image…"
-        HuskBuiltInJIT.send(.prepare(pairingData: pairing)) { [weak self] result in
-            guard let self else { return }
-            busy = false
-            switch result {
-            case .success(let response):
-                txmPresent = response.txmPresent
-                prepared = response.success
-                status = response.success ? response.message : nil
-                error = response.success ? nil : helperFailure(response.message)
-                log("setup check \(response.success ? "passed" : "failed"): \(response.message)")
-            case .failure(let failure):
-                prepared = false
-                status = nil
-                error = failure.localizedDescription
-            }
-        }
+        performBuiltIn(.prepare(pairingData: pairing))
     }
 
     func enableBuiltIn() {
@@ -294,71 +299,152 @@ final class JITCoordinator: ObservableObject {
             return
         }
 
-        busy = true
-        error = nil
-        connectionProblem = nil
-        status = "Starting Husk's JIT helper…"
-        log("enabling JIT with the built-in helper")
-        var readiness: Timer?
-        var finished = false
-        let finish: (String?) -> Void = { [weak self] failure in
-            guard let self, !finished else { return }
-            finished = true
-            readiness?.invalidate()
-            busy = false
-            if let failure {
-                status = nil
-                error = failure
-                log("built-in JIT failed: \(failure)")
-                showSetup = true
-            } else {
-                status = "JIT is on."
-                error = nil
-                attachGeneration += 1
-                log("built-in helper attached")
-            }
-        }
-
-        HuskBuiltInJIT.send(
-            .enable(targetPID: getpid(), pairingData: pairing, scriptBase64: script),
-            started: { [weak self] in
-                self?.status = "Waiting for the helper to attach…"
-                readiness = Self.waitForDebugger { attached in
-                    finish(attached ? nil : "The helper did not attach within 90 seconds. "
-                                          + "Check that LocalDevVPN is connected, then try again.")
-                }
-            },
-            completion: { [weak self] result in
-                // The helper replies once Husk detaches, or when attaching failed.
-                switch result {
-                case .success(let response):
-                    self?.txmPresent = response.txmPresent
-                    HuskLog.log("jit", "helper: \(response.message)")
-                    if !response.success {
-                        finish(self?.helperFailure(response.message) ?? response.message)
-                    }
-                case .failure(let failure):
-                    finish(failure.localizedDescription)
-                }
-            })
+        performBuiltIn(.enable(targetPID: getpid(), pairingData: pairing, scriptBase64: script))
     }
 
     func resetDDI() {
+        performBuiltIn(.resetDDI)
+    }
+
+    /// Invalidate the generation before cancellation, including any synchronous
+    /// error callback. Never let an old completion overwrite a later run.
+    func cancelBuiltIn() {
+        guard busy, !JITBootstrap.debuggedFlag else { return }
+        activeRequest = nil
+        monitoring?.invalidate()
+        monitoring = nil
+        busy = false
+        prepared = false
+        progressFraction = nil
+        progressStalled = false
+        status = nil
+        error = "已请求停止。helper 完全结束前不能重试；如果一直无法结束，请完全关闭并重新打开 App。"
+        log("设置检查取消；等待 helper 确认结束")
+        HuskBuiltInJIT.cancelPending()
+    }
+
+    private func performBuiltIn(_ request: HuskJITRequest) {
+        guard !busy else { return }
+        guard !HuskBuiltInJIT.hasPendingRequest else {
+            error = "上一次 helper 尚未结束，请稍后重试或重新打开 App。"
+            return
+        }
+        let generation = UUID()
+        activeRequest = generation
         busy = true
+        prepared = false
         error = nil
-        status = "Resetting the Developer Disk Image cache…"
-        HuskBuiltInJIT.send(.resetDDI) { [weak self] result in
-            guard let self else { return }
-            busy = false
-            prepared = false
+        connectionProblem = nil
+        progressFraction = nil
+        elapsedSeconds = 0
+        progressStalled = false
+        helperResponding = false
+        lastStage = nil
+        lastFraction = nil
+        attachBegan = nil
+        requestBegan = ProcessInfo.processInfo.systemUptime
+        lastProgressAt = requestBegan
+        lastHeartbeatAt = 0
+        status = "正在启动独立 JIT helper…"
+        log("\(request.operation.rawValue): 新的设置请求")
+        monitoring?.invalidate()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.activeRequest == generation, self.busy else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                self.elapsedSeconds = Int(now - self.requestBegan)
+                self.progressStalled = now - self.lastProgressAt >= 90
+                self.helperResponding = self.lastHeartbeatAt > 0 && now - self.lastHeartbeatAt < 15
+                if request.operation == .enable {
+                    if JITBootstrap.debuggedFlag || JITBootstrap.prewarmed || JITBootstrap.isLive {
+                        self.monitoring?.invalidate()
+                        self.monitoring = nil
+                        self.busy = false
+                        self.error = nil
+                        self.status = "调试器已连接，正在申请可执行内存。"
+                        self.attachGeneration += 1
+                        self.log("helper debugger attach confirmed; JIT memory still requires prewarm")
+                    } else if let began = self.attachBegan, now - began >= 90 {
+                        self.cancelBuiltIn()
+                        self.error = "DDI 准备完成，但 90 秒内没有确认调试器连接。请导出诊断并核对开发者签名、get-task-allow 和配对。"
+                    }
+                }
+            }
+        }
+        monitoring = timer
+        RunLoop.main.add(timer, forMode: .common)
+        HuskBuiltInJIT.send(request, started: { [weak self] in
+            guard let self, self.activeRequest == generation, self.busy else { return }
+            self.status = request.operation == .resetDDI ? "正在重置 DDI 缓存…" : "helper 已启动，等待设备连接…"
+        }, progress: { [weak self] event in
+            guard let self, self.activeRequest == generation, self.busy else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            self.lastHeartbeatAt = now
+            self.helperResponding = true
+            guard event.stage != "heartbeat" else { return }
+            if event.stage != self.lastStage || event.fraction != self.lastFraction {
+                self.lastProgressAt = now
+                self.progressStalled = false
+                self.lastStage = event.stage
+                self.lastFraction = event.fraction
+                self.log("阶段=\(event.stage)" + (event.fraction.map { " 进度=\(Int($0 * 100))%" } ?? ""))
+            }
+            self.progressFraction = event.fraction
+            self.status = Self.stageDescription(event.stage)
+            if event.stage == "attaching", self.attachBegan == nil { self.attachBegan = now }
+        }, completion: { [weak self] result in
+            guard let self, self.activeRequest == generation else { return }
+            // An enable request normally returns after prewarm and detach. Its
+            // delayed successful completion must not replace the established UI.
+            let memoryReady = request.operation == .enable && (JITBootstrap.prewarmed || JITBootstrap.isLive)
+            self.monitoring?.invalidate()
+            self.monitoring = nil
+            self.busy = false
+            self.progressStalled = false
+            self.activeRequest = nil
+            self.progressFraction = nil
+            if memoryReady {
+                self.status = "JIT 可执行内存已准备好。"
+                self.error = nil
+                self.log("helper 请求结束；已确认 JIT 内存，不再让迟到回调改变成功状态")
+                return
+            }
             switch result {
             case .success(let response):
-                status = response.success ? response.message : nil
-                error = response.success ? nil : response.message
+                self.txmPresent = response.txmPresent
+                self.log("\(request.operation.rawValue): \(response.success ? "成功" : "失败") \(response.message)")
+                self.prepared = request.operation == .prepare && response.success
+                if request.operation == .enable && response.success {
+                    // A successful return without a observed debugger is not JIT.
+                    self.error = "helper 已返回，但没有确认可执行内存。请检查日志并重新运行 JIT 设置。"
+                    self.status = nil
+                } else {
+                    self.status = response.success ? response.message : nil
+                    self.error = response.success ? nil : self.helperFailure(response.message)
+                }
             case .failure(let failure):
-                status = nil
-                error = failure.localizedDescription
+                self.prepared = false
+                self.status = nil
+                self.error = JITDiagnostics.redact(failure.localizedDescription)
+                self.log("\(request.operation.rawValue): \(self.error ?? "失败")")
             }
+        })
+    }
+
+    private static func stageDescription(_ stage: String) -> String {
+        switch stage {
+        case "helperStarted": return "helper 已响应"
+        case "checkingReachability": return "正在检查 VPN 路由与本机配对连接…"
+        case "checkingDDI": return "正在检查 DDI 缓存和系统版本…"
+        case "downloadingDDI": return "正在下载匹配系统的 Developer Disk Image…"
+        case "mountingDDI": return "正在挂载 Developer Disk Image…"
+        case "verifyingDDI": return "正在验证 Developer Disk Image…"
+        case "ready": return "VPN 与 DDI 准备完成"
+        case "attaching": return "DDI 已就绪，正在等待调试器连接…"
+        case "scriptRunning": return "正在运行 Husk JIT 调试脚本…"
+        case "resettingDDI": return "正在重置 DDI 缓存…"
+        case "detached": return "调试器已结束请求"
+        default: return "helper 正在处理请求…"
         }
     }
 
@@ -415,3 +501,4 @@ enum LocalDevVPN {
         UIApplication.shared.open(installed ? connect : appStore)
     }
 }
+
